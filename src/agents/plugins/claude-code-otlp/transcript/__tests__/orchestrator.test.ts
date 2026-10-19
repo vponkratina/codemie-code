@@ -1554,6 +1554,34 @@ describe('openSessionEnvCheckPass', () => {
     await check.finalize(true);
   });
 
+  it('full path: an empty effort/permissionMode input (PostModelSwitch/ConfigChange payload shape) keeps the baseline, not blanks it', async () => {
+    const sessionId = 'session-env-full-empty-payload';
+    const startPass = await openSessionStartPass(sessionId, 'sha-1', sessionEnvFixture);
+    await startPass.finalize(true);
+
+    // ConfigChange/PostModelSwitch can fire with no effort/permission_mode in the hook payload;
+    // the full recompute itself still surfaces some other genuinely changed field (output_style).
+    resolveSessionEnvFieldsMock.mockResolvedValue({
+      ...sessionEnvFixture,
+      effort: '',
+      permission_mode: '',
+      output_style: 'concise',
+    });
+
+    const check = await openSessionEnvCheckPass(sessionId, {
+      effort: '',
+      permissionMode: '',
+      full: { cwd: '/repo', configuredModel: sessionEnvFixture.configured_model },
+    });
+
+    expect(check.sessionEnvFields).toMatchObject({
+      effort: sessionEnvFixture.effort,
+      permission_mode: sessionEnvFixture.permission_mode,
+      output_style: 'concise',
+    });
+    await check.finalize(true);
+  });
+
   it('full path: returns null when the full recompute matches the existing baseline exactly', async () => {
     const sessionId = 'session-env-full-unchanged';
     const startPass = await openSessionStartPass(sessionId, 'sha-1', sessionEnvFixture);
