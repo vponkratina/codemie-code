@@ -1236,6 +1236,34 @@ describe('openSessionStartPass', () => {
     await pass.finalize(true);
   });
 
+  it('the true first fire (no prior snapshot) always suppresses the send', async () => {
+    const pass = await openSessionStartPass('session-start-true-first-fire', 'sha-start', sessionEnvFixture);
+    expect(pass.sessionEnvFields).toBeNull();
+    await pass.finalize(true);
+  });
+
+  it('fixes bug 2 end-to-end: the true first SessionStart sends nothing, and the first real Stop sends exactly once', async () => {
+    const sessionId = 'session-start-true-first-fire-then-stop';
+    const emptyFirstFields = { ...sessionEnvFixture, effort: '', permission_mode: '' };
+    const startPass = await openSessionStartPass(sessionId, 'sha-1', emptyFirstFields);
+    expect(startPass.sessionEnvFields).toBeNull();
+    await startPass.finalize(true);
+
+    resolveVolatileSessionEnvFieldsMock.mockResolvedValue({
+      effort: 'high',
+      permission_mode: 'acceptEdits',
+      os: sessionEnvFixture.os,
+      arch: sessionEnvFixture.arch,
+      node_version: sessionEnvFixture.node_version,
+      timezone: sessionEnvFixture.timezone,
+      hostname_hash: sessionEnvFixture.hostname_hash,
+    });
+    const stopCheck = await openSessionEnvCheckPass(sessionId, { effort: 'high', permissionMode: 'acceptEdits' });
+    expect(stopCheck.sessionEnvFields).not.toBeNull();
+    expect(stopCheck.sessionEnvFields).toMatchObject({ effort: 'high', permission_mode: 'acceptEdits' });
+    await stopCheck.finalize(true);
+  });
+
   it('finalize(true) persists git_head_start/sessionStartedAt so a later SessionEnd reads them back', async () => {
     const sessionId = 'session-start-accepted';
     const transcriptPath = writeTranscript('transcript-session-start-accepted.jsonl', [noUsageLine('uuid-main')]);
@@ -1314,17 +1342,14 @@ describe('openSessionStartPass', () => {
     const sessionId = 'session-start-env-merge';
     const firstFields = { ...sessionEnvFixture, effort: 'high', permission_mode: 'acceptEdits', configured_model: 'claude-opus-5' };
     const firstPass = await openSessionStartPass(sessionId, 'sha-1', firstFields);
-    expect(firstPass.sessionEnvFields).toEqual(firstFields); // first fire: unchanged
+    expect(firstPass.sessionEnvFields).toBeNull(); // first fire is now always suppressed
     await firstPass.finalize(true);
 
     // Resume fire: fresh payload has empty effort/permission_mode/configured_model.
     const resumeFields = { ...sessionEnvFixture, effort: '', permission_mode: '', configured_model: '' };
     const secondPass = await openSessionStartPass(sessionId, 'sha-2', resumeFields);
-    expect(secondPass.sessionEnvFields).toMatchObject({
-      effort: 'high',
-      permission_mode: 'acceptEdits',
-      configured_model: 'claude-opus-5',
-    });
+    // Merged equals the persisted baseline exactly, so nothing new to send.
+    expect(secondPass.sessionEnvFields).toBeNull();
     await secondPass.finalize(true);
   });
 
@@ -1355,13 +1380,12 @@ describe('openSessionStartPass', () => {
 
     // Compact/resume fire: fresh payload has empty effort/permission_mode/configured_model —
     // openSessionStartPass must merge these back onto `last` (same scenario as the first test above).
+    // The compact/resume SessionStart itself also finds no diff against the merged snapshot, so it
+    // sends nothing either — strengthening, not weakening, the "no duplicate" guarantee this test's
+    // title claims.
     const resumeFields = { ...sessionEnvFixture, effort: '', permission_mode: '', configured_model: '' };
     const secondPass = await openSessionStartPass(sessionId, 'sha-2', resumeFields);
-    expect(secondPass.sessionEnvFields).toMatchObject({
-      effort: 'high',
-      permission_mode: 'acceptEdits',
-      configured_model: 'claude-opus-5',
-    });
+    expect(secondPass.sessionEnvFields).toBeNull();
     await secondPass.finalize(true);
 
     // Stop fires next, reporting the SAME real effort/permission_mode SessionStart's merge

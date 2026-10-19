@@ -982,6 +982,15 @@ describe('ClaudeCodeOtlpPlugin agent.session.env (SessionStart)', () => {
     const envEvent = forwarded.find((e) => e.type === 'agent.session.env');
     expect(envEvent).toMatchObject({ configured_model: 'claude-opus-5', effort: 'high', permission_mode: 'acceptEdits' });
   });
+
+  it('forwards no agent.session.env record when the pass signals nothing to send', async () => {
+    openSessionStartPassMock.mockResolvedValue({ events: [], finalize: vi.fn(async () => {}), sessionEnvFields: null });
+
+    await plugin.processOtlpEvent(event('SessionStart'), { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    expect(forwardedEvents()).toHaveLength(1);
+    expect(forwardedEvents()[0].type).toBe('agent.session.start');
+  });
 });
 
 describe('ClaudeCodeOtlpPlugin agent.git.snapshot (SessionEnd)', () => {

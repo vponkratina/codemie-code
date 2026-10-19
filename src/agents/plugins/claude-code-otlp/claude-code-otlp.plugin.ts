@@ -147,10 +147,14 @@ export class ClaudeCodeOtlpPlugin extends OtlpAgentAdapter<HookInput, UserPrompt
    * spread first so a same-named payload key can never override a resolved value. `model` is passed
    * through verbatim and is '' when the payload omits it (e.g. `clear`).
    *
-   * Also emits `agent.session.env`. `openSessionStartPass` records `git_head_start`/the session's
-   * wall-clock start time into the parse state — same commit-after-send contract as every other
-   * trigger (`pass.finalize`), so `onSessionEndEvent` only ever reads back a value that was
-   * actually persisted after a successful send, never persisted ahead of it.
+   * Also conditionally emits `agent.session.env`: the true first fire persists the baseline but
+   * sends nothing; a later fire sends only when the merged snapshot differs from what's already
+   * persisted — the first hook to report a real, changed value (normally the session's first
+   * `Stop`) becomes the one and only sender of that value. `openSessionStartPass` records
+   * `git_head_start`/the session's wall-clock start time into the parse state — same
+   * commit-after-send contract as every other trigger (`pass.finalize`), so `onSessionEndEvent`
+   * only ever reads back a value that was actually persisted after a successful send, never
+   * persisted ahead of it.
    */
   private async onSessionStart(hookInput: SessionStartHookInput): Promise<ClaudeForwardDecision> {
     const context: OtlpHookContext = { cwd: hookInput.cwd };
@@ -164,13 +168,15 @@ export class ClaudeCodeOtlpPlugin extends OtlpAgentAdapter<HookInput, UserPrompt
     ]);
     const pass = await openSessionStartPass(hookInput.session_id, gitHeadStart.git_head_start, sessionEnvFields);
 
-    const sessionEnvEvent = buildSessionEnvEvent(hookInput.session_id, pass.sessionEnvFields);
+    const payload: Record<string, unknown>[] = [
+      { ...hookInput, ...envFields, ...identityCandidateFields, ...gitHeadStart, model },
+    ];
+    if (pass.sessionEnvFields) {
+      payload.push(buildSessionEnvEvent(hookInput.session_id, pass.sessionEnvFields));
+    }
     return {
       decision: 'forward',
-      payload: [
-        { ...hookInput, ...envFields, ...identityCandidateFields, ...gitHeadStart, model },
-        sessionEnvEvent,
-      ],
+      payload,
       finalize: pass.finalize,
     };
   }

@@ -544,7 +544,7 @@ function finalizeOf(
  * recorded as the new baseline.
  */
 export interface SessionStartPass extends TranscriptPass {
-  sessionEnvFields: SessionEnvFields;
+  sessionEnvFields: SessionEnvFields | null;
 }
 
 export async function openSessionStartPass(
@@ -572,7 +572,12 @@ export async function openSessionStartPass(
         }
       : sessionEnvFields;
     state.lastSessionEnvFields = merged;
-    return { events: [], finalize: finalizeOf(sessionId, state, release), sessionEnvFields: merged };
+    const shouldSend = last !== null && !sessionEnvFieldsEqual(last, merged);
+    return {
+      events: [],
+      finalize: finalizeOf(sessionId, state, release),
+      sessionEnvFields: shouldSend ? merged : null,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.debug('[claude-code-otlp] SessionStart pass failed', ...sanitizeLogArgs({ sessionId, err: msg }));
