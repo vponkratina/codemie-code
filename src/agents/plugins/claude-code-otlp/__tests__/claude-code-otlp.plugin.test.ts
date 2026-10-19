@@ -640,6 +640,55 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     expect(stopEvent.duration_ms).toBe(0);
   });
 
+  it('stamps description/tool_use_id/spawn_depth/worktree/started_at/duration_ms on the forwarded agent.subagent.stop event', async () => {
+    readSubagentMetaMock.mockResolvedValue({ toolUseId: 'tu-sidecar', spawnDepth: 2, description: 'task' });
+    openSubagentPassMock.mockResolvedValue({
+      events: [{ type: 'agent.subagent.usage', started_at: '2026-10-01T00:00:00.000Z', duration_ms: 1500 }],
+      finalize: vi.fn(async () => {}),
+    });
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStop',
+        agent_transcript_path: '/tmp/agent-sub-3.jsonl',
+        agent_id: 'sub-3',
+        agent_type: 'explore',
+        cwd: '/repo/worktrees/feature',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    const [stopEvent] = forwardedEvents();
+    expect(stopEvent).toMatchObject({
+      description: 'task',
+      tool_use_id: 'tu-sidecar',
+      workflow_run: '',
+      spawn_depth: 2,
+      worktree: '/repo/worktrees/feature',
+      started_at: '2026-10-01T00:00:00.000Z',
+      duration_ms: 1500,
+    });
+  });
+
+  it('defaults started_at/duration_ms to empty/0 on agent.subagent.stop when no agent.subagent.usage was derived', async () => {
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStop',
+        agent_transcript_path: '/tmp/agent-sub-5.jsonl',
+        agent_id: 'sub-5',
+        agent_type: 'explore',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    const [stopEvent] = forwardedEvents();
+    expect(stopEvent.started_at).toBe('');
+    expect(stopEvent.duration_ms).toBe(0);
+  });
+
   it('skips openSubagentPass on SubagentStop when agent_transcript_path is missing', async () => {
     const plugin = new ClaudeCodeOtlpPlugin();
     const rawEvent = JSON.stringify(hookEvent({ hook_event_name: 'SubagentStop', agent_type: 'explore' }));
@@ -845,7 +894,14 @@ describe('ClaudeCodeOtlpPlugin agent.session.env (SessionStart)', () => {
     vi.mocked(isProjectTracked).mockResolvedValue(true);
     resolveClientVersionMock.mockResolvedValue('2.1.23');
     forwardOtlpEventsToSpool.mockResolvedValue(true);
-    openSessionStartPassMock.mockResolvedValue(emptyPass());
+    // Default: openSessionStartPass echoes back whatever sessionEnvFields it was given, as if
+    // there were no prior snapshot to merge onto — matches real first-fire behavior and keeps
+    // the pre-existing tests in this block (which assert against the raw resolved fields)
+    // passing unchanged.
+    openSessionStartPassMock.mockImplementation(async (_sessionId: string, _gitHeadStart: string, fields: unknown) => ({
+      ...emptyPass(),
+      sessionEnvFields: fields,
+    }));
     resolveSessionEnvFieldsMock.mockImplementation(async (_cwd: string, model: string, permissionMode: string) => ({
       ...SESSION_ENV_FIELDS_STUB,
       configured_model: model,
@@ -905,6 +961,26 @@ describe('ClaudeCodeOtlpPlugin agent.session.env (SessionStart)', () => {
       expect.objectContaining({ configured_model: '', permission_mode: '' })
     );
     expect(pass.finalize).toHaveBeenCalledWith(true);
+  });
+
+  it("sends the SessionStart pass's merged sessionEnvFields, not the raw resolveSessionEnvFields output", async () => {
+    const mergedFields = {
+      ...SESSION_ENV_FIELDS_STUB,
+      configured_model: 'claude-opus-5',
+      effort: 'high', // carried forward by openSessionStartPass; never in the raw payload
+      permission_mode: 'acceptEdits',
+    };
+    openSessionStartPassMock.mockResolvedValue({ events: [], finalize: vi.fn(async () => {}), sessionEnvFields: mergedFields });
+    resolveSessionEnvFieldsMock.mockResolvedValue({ ...SESSION_ENV_FIELDS_STUB, configured_model: '', permission_mode: '' });
+
+    await plugin.processOtlpEvent(
+      JSON.stringify({ session_id: 's', transcript_path: '', cwd: '/x', hook_event_name: 'SessionStart', source: 'resume' }),
+      { ensureOtlpProxy, forwardOtlpEventsToSpool }
+    );
+
+    const forwarded = forwardedEvents();
+    const envEvent = forwarded.find((e) => e.type === 'agent.session.env');
+    expect(envEvent).toMatchObject({ configured_model: 'claude-opus-5', effort: 'high', permission_mode: 'acceptEdits' });
   });
 });
 
