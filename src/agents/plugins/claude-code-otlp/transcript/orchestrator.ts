@@ -628,7 +628,12 @@ async function computeSessionEnvUpdate(
     candidate = { ...resolved, effort: input.effort, permission_mode: input.permissionMode };
   } else {
     const volatile = await resolveVolatileSessionEnvFields(input.effort, input.permissionMode);
-    candidate = { ...last!, ...volatile };
+    candidate = {
+      ...last!,
+      ...volatile,
+      effort: input.effort || last!.effort,
+      permission_mode: input.permissionMode || last!.permission_mode,
+    };
   }
 
   if (last && sessionEnvFieldsEqual(last, candidate)) {
