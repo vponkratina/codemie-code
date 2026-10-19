@@ -56,6 +56,11 @@ vi.mock('../transcript/orchestrator.js', () => ({
   openSessionEnvCheckPass: openSessionEnvCheckPassMock,
   openSubagentPass: openSubagentPassMock,
   openSessionEndPass: openSessionEndPassMock,
+  buildSessionEnvEvent: (sessionId: string, fields: Record<string, unknown>) => ({
+    type: 'agent.session.env',
+    session_id: sessionId,
+    ...fields,
+  }),
 }));
 
 vi.mock('../transcript/subagent-usage.js', () => ({
@@ -99,6 +104,10 @@ function emptySessionEndPass(): {
 } {
   return { ...emptyPass(), gitHeadStart: '', sessionStartedAt: '' };
 }
+
+/** The `SessionEnvCheckInput` every handler below derives from a hook payload with no
+ *  `effort`/`permission_mode` of its own — the common case in this file's fixtures. */
+const NO_ENV_CHECK = { effort: '', permissionMode: '' };
 
 /** Every event sent in the batch call (there is at most one call per processOtlpEvent). */
 function forwardedEvents(): Record<string, unknown>[] {
@@ -318,9 +327,14 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
 
       await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
 
-      expect(openMainTranscriptPassMock).toHaveBeenCalledWith('sid-1', '/tmp/transcript.jsonl', hookEventName);
+      expect(openMainTranscriptPassMock).toHaveBeenCalledWith(
+        'sid-1',
+        '/tmp/transcript.jsonl',
+        hookEventName,
+        NO_ENV_CHECK
+      );
       const [forwarded] = forwardedEvents();
-      expect(forwarded).toMatchObject(parsedEvent);
+      expect(forwarded).toMatchObject({ ...parsedEvent, cwd: 'repo' });
     }
   );
 
@@ -365,9 +379,9 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
 
     await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
 
-    expect(openSessionEndPassMock).toHaveBeenCalledWith('sid-1', '/tmp/transcript.jsonl', '/repo');
+    expect(openSessionEndPassMock).toHaveBeenCalledWith('sid-1', '/tmp/transcript.jsonl', '/repo', NO_ENV_CHECK);
     const [forwarded] = forwardedEvents();
-    expect(forwarded).toMatchObject(parsedEvent);
+    expect(forwarded).toMatchObject({ ...parsedEvent, cwd: 'repo' });
   });
 
   it('resends the SessionEnd batch once more when the first send fails (retryOnce)', async () => {
@@ -515,13 +529,17 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
 
     await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
 
-    expect(openSubagentPassMock).toHaveBeenCalledWith('sid-1', {
-      agentId: 'sub-1',
-      filePath: '/tmp/agent-sub-1.jsonl',
-      toolUseId: 'tu-1',
-      agentType: 'explore',
-      cwd: '/repo',
-    });
+    expect(openSubagentPassMock).toHaveBeenCalledWith(
+      'sid-1',
+      {
+        agentId: 'sub-1',
+        filePath: '/tmp/agent-sub-1.jsonl',
+        toolUseId: 'tu-1',
+        agentType: 'explore',
+        cwd: '/repo',
+      },
+      NO_ENV_CHECK
+    );
   });
 
   it('derives agent_id from the sidecar filename on SubagentStop when agent_id is absent', async () => {
@@ -536,7 +554,11 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
 
     await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
 
-    expect(openSubagentPassMock).toHaveBeenCalledWith('sid-1', expect.objectContaining({ agentId: 'sub-2' }));
+    expect(openSubagentPassMock).toHaveBeenCalledWith(
+      'sid-1',
+      expect.objectContaining({ agentId: 'sub-2' }),
+      NO_ENV_CHECK
+    );
   });
 
   it('fills tool_use_id/spawn_depth/description from the .meta.json sidecar on SubagentStop', async () => {
@@ -554,15 +576,68 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
 
     expect(readSubagentMetaMock).toHaveBeenCalledWith('/tmp/agent-sub-3.jsonl');
-    expect(openSubagentPassMock).toHaveBeenCalledWith('sid-1', {
-      agentId: 'sub-3',
-      filePath: '/tmp/agent-sub-3.jsonl',
-      toolUseId: 'tu-sidecar',
-      agentType: 'explore',
-      spawnDepth: 2,
-      description: 'task',
-      cwd: '/repo',
+    expect(openSubagentPassMock).toHaveBeenCalledWith(
+      'sid-1',
+      {
+        agentId: 'sub-3',
+        filePath: '/tmp/agent-sub-3.jsonl',
+        toolUseId: 'tu-sidecar',
+        agentType: 'explore',
+        spawnDepth: 2,
+        description: 'task',
+        cwd: '/repo',
+      },
+      NO_ENV_CHECK
+    );
+  });
+
+  it('stamps description/tool_use_id/spawn_depth/worktree/started_at/duration_ms on the forwarded agent.subagent.stop event', async () => {
+    readSubagentMetaMock.mockResolvedValue({ toolUseId: 'tu-sidecar', spawnDepth: 2, description: 'task' });
+    openSubagentPassMock.mockResolvedValue({
+      events: [{ type: 'agent.subagent.usage', started_at: '2026-10-01T00:00:00.000Z', duration_ms: 1500 }],
+      finalize: vi.fn(async () => {}),
     });
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStop',
+        agent_transcript_path: '/tmp/agent-sub-3.jsonl',
+        agent_id: 'sub-3',
+        agent_type: 'explore',
+        cwd: '/repo/worktrees/feature',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    const [stopEvent] = forwardedEvents();
+    expect(stopEvent).toMatchObject({
+      description: 'task',
+      tool_use_id: 'tu-sidecar',
+      workflow_run: '',
+      spawn_depth: 2,
+      worktree: '/repo/worktrees/feature',
+      started_at: '2026-10-01T00:00:00.000Z',
+      duration_ms: 1500,
+    });
+  });
+
+  it('defaults started_at/duration_ms to empty/0 on agent.subagent.stop when no agent.subagent.usage was derived', async () => {
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStop',
+        agent_transcript_path: '/tmp/agent-sub-5.jsonl',
+        agent_id: 'sub-5',
+        agent_type: 'explore',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    const [stopEvent] = forwardedEvents();
+    expect(stopEvent.started_at).toBe('');
+    expect(stopEvent.duration_ms).toBe(0);
   });
 
   it('stamps description/tool_use_id/spawn_depth/worktree/started_at/duration_ms on the forwarded agent.subagent.stop event', async () => {
@@ -658,7 +733,7 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     // processOtlpEvent.
     expect(forwardOtlpEventsToSpool).toHaveBeenCalledTimes(1);
     expect(forwardedEvents()).toEqual([
-      expect.objectContaining(parsedEvent),
+      expect.objectContaining({ ...parsedEvent, cwd: 'repo' }),
       expect.objectContaining(derivedUsageEvent),
       expect.objectContaining(derivedSummaryEvent),
     ]);
